@@ -6,7 +6,6 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
-import java.util.Arrays;
 
 /**
  * Handles communication with a single client in its own thread.
@@ -35,11 +34,11 @@ public class ClientHandler implements Runnable {
                 System.out.println("Received from client: " + line);
                 
                 String[] parts = line.split(" ", 3); // Split into Command, Filename, and Content (if needed)
-                String command = parts[0].toUpperCase();
 
                 try {
                     // All file system operations are handled within a try-catch to 
                     // report specific errors without crashing the thread.
+                    String command = parts[0].toUpperCase();
                     switch (command) {
                         case "CREATE":
                             handleCreate(parts, writer);
@@ -62,7 +61,7 @@ public class ClientHandler implements Runnable {
                             break;
 
                         case "QUIT":
-                            writer.println("SUCCESS: Disconnecting.");
+                            writer.println("Disconnecting.");
                             return; // Terminates the run() method and the thread
 
                         default:
@@ -71,7 +70,7 @@ public class ClientHandler implements Runnable {
                     }
                 } catch (Exception e) {
                     // Catch exceptions thrown by the fsManager methods
-                    writer.println("ERROR: " + e.getMessage());
+                    writer.println(e.getMessage());
                 }
             }
         } catch (Exception e) {
@@ -96,15 +95,10 @@ public class ClientHandler implements Runnable {
             return;
         }
         String filename = parts[1];
-        
-        if (filename.length() > 11) {
-            writer.println("ERROR: filename too large");
-            return;
-        }
 
-        // Assumes fsManager.createFile throws an exception on resource failure
+        // Assumes fsManager.createFile throws an exception on error
         fsManager.createFile(filename);
-        writer.println("SUCCESS: File '" + filename + "' created.");
+        writer.println("OK");
     }
 
     private void handleWrite(String[] parts, PrintWriter writer) throws Exception {
@@ -118,11 +112,9 @@ public class ClientHandler implements Runnable {
         // Convert content string to bytes for the writeFile method
         byte[] contentBytes = content.getBytes(); 
         
-        // Assumes fsManager.writeFile throws specific exceptions:
-        // - "file <filename> does not exist"
-        // - "file too large" (if not enough free blocks)
+        // Assumes fsManager.writeFile throws specific exceptions
         fsManager.writeFile(filename, contentBytes);
-        writer.println("SUCCESS: Data written to file '" + filename + "'.");
+        writer.println("OK");
     }
     
     private void handleRead(String[] parts, PrintWriter writer) throws Exception {
@@ -132,12 +124,12 @@ public class ClientHandler implements Runnable {
         }
         String filename = parts[1];
         
-        // Assumes fsManager.readFile throws "file <filename> does not exist"
+        // Assumes fsManager.readFile throws exception if file doesn't exist
         byte[] fileContents = fsManager.readFile(filename);
         
-        // Send the file content back to the client
+        // Send the file content back to the client (just the content, no prefix)
         String contentString = new String(fileContents);
-        writer.println("SUCCESS: " + contentString);
+        writer.println(contentString);
     }
 
     private void handleDelete(String[] parts, PrintWriter writer) throws Exception {
@@ -147,9 +139,9 @@ public class ClientHandler implements Runnable {
         }
         String filename = parts[1];
         
-        // Assumes fsManager.deleteFile throws "file <filename> does not exist"
+        // Assumes fsManager.deleteFile throws exception if file doesn't exist
         fsManager.deleteFile(filename);
-        writer.println("SUCCESS: File '" + filename + "' deleted.");
+        writer.println("OK");
     }
 
     private void handleList(PrintWriter writer) {
@@ -157,10 +149,10 @@ public class ClientHandler implements Runnable {
         String[] filenames = fsManager.listFiles();
         
         if (filenames.length == 0) {
-            writer.println("SUCCESS: No files in the file system.");
+            writer.println("");
         } else {
-            // Send a single response line containing all filenames separated by a delimiter
-            writer.println("SUCCESS: " + String.join(", ", filenames));
+            // Send comma-separated filenames (no "SUCCESS:" prefix)
+            writer.println(String.join(",", filenames));
         }
     }
 }

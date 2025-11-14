@@ -2,28 +2,28 @@ package ca.concordia.filesystem.datastructures;
 
 public class FNode {
 
-    private int blockIndex;
-    private int next;
+    private short blockIndex;
+    private short next;
 
-    public FNode(int blockIndex) {
+    public FNode(short blockIndex) {
         this.blockIndex = blockIndex;
         this.next = -1;
     }
 
     // Added minimal getters and setters used by FileSystemManager
-    public int getBlockIndex() {
+    public short getBlockIndex() {
         return blockIndex;
     }
 
-    public void setBlockIndex(int blockIndex) {
+    public void setBlockIndex(short blockIndex) {
         this.blockIndex = blockIndex;
     }
 
-    public int getNext() {
+    public short getNext() {
         return next;
     }
 
-    public void setNext(int next) {
+    public void setNext(short next) {
         this.next = next;
     }
 }

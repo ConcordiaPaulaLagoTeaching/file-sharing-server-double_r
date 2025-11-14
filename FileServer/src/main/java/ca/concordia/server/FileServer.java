@@ -15,14 +15,14 @@ public class FileServer {
     private int port;
     public FileServer(int port, String fileSystemName, int totalSize){
         // Initialize the FileSystemManager
-        FileSystemManager fsManager = new FileSystemManager(fileSystemName,
-                10*128 );
-        this.fsManager = fsManager;
+       // FileSystemManager fsManager = new FileSystemManager(fileSystemName,  10*128 );
+        this.fsManager = new FileSystemManager(fileSystemName, totalSize);
+        //this.fsManager = fsManager;this.fsManager remains null, and will throw a NullPointerException when accessed (e.g. in ClientHandler).
         this.port = port;
     }
 
     public void start(){
-        try (ServerSocket serverSocket = new ServerSocket(12345)) {
+        try (ServerSocket serverSocket = new ServerSocket(this.port)) {
             System.out.println("Server started. Listening on port " + this.port+"...");
 
             while (true) {
