@@ -7,6 +7,8 @@ import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 
+import ca.concordia.server.ClientHandler;
+
 public class FileServer {
 
     private FileSystemManager fsManager;
@@ -21,46 +23,18 @@ public class FileServer {
 
     public void start(){
         try (ServerSocket serverSocket = new ServerSocket(12345)) {
-            System.out.println("Server started. Listening on port 12345...");
+            System.out.println("Server started. Listening on port " + this.port+"...");
 
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                System.out.println("Handling client: " + clientSocket);
-                try (
-                        BufferedReader reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-                        PrintWriter writer = new PrintWriter(clientSocket.getOutputStream(), true)
-                ) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        System.out.println("Received from client: " + line);
-                        String[] parts = line.split(" ");
-                        String command = parts[0].toUpperCase();
+                System.out.println("New client connected: " + clientSocket.getInetAddress().getHostAddress());
+                // Create the ClientHandler task
+            ClientHandler clientTask = new ClientHandler(clientSocket, this.fsManager); 
 
-                        switch (command) {
-                            case "CREATE":
-                                fsManager.createFile(parts[1]);
-                                writer.println("SUCCESS: File '" + parts[1] + "' created.");
-                                writer.flush();
-                                break;
-                            //TODO: Implement other commands READ, WRITE, DELETE, LIST
-                            case "QUIT":
-                                writer.println("SUCCESS: Disconnecting.");
-                                return;
-                            default:
-                                writer.println("ERROR: Unknown command.");
-                                break;
-                        }
-                    }
-                } catch (Exception e) {
-                    e.printStackTrace();
-                } finally {
-                    try {
-                        clientSocket.close();
-                    } catch (Exception e) {
-                        // Ignore
-                    }
-                }
-            }
+            // Create a new Thread and start it
+            Thread clientThread = new Thread(clientTask);
+            clientThread.start();
+        }
         } catch (Exception e) {
             e.printStackTrace();
             System.err.println("Could not start server on port " + port);
