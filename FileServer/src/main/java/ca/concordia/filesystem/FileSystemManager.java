@@ -112,7 +112,7 @@ public class FileSystemManager {
 
     // -------------------- Create --------------------
     public void createFile(String fileName) throws Exception {
-        lock.writeLock().lock(); //only one writer at a time
+        lock.writeLock().lock(); // acquire exclusive write lock: blocks all other readers and writers
         try {
             if (fileName.length() > 11) { //checks filename length
                 throw new Exception("ERROR: filename too large");
@@ -141,7 +141,7 @@ public class FileSystemManager {
             inodeTable[freeIndex] = new FEntry(fileName, (short) 0, (short) -1); 
             writeFEntry(freeIndex, inodeTable[freeIndex]);
         } finally {
-            lock.writeLock().unlock();
+            lock.writeLock().unlock(); // Release write lock
         }
     }
 
@@ -216,7 +216,7 @@ public class FileSystemManager {
 
     // -------------------- Delete --------------------
     public void deleteFile(String fileName) throws Exception {
-        lock.writeLock().lock();
+        lock.writeLock().lock(); // acquire exclusive write lock: blocks all other readers and writers
         try {
             int index = findFEntryIndex(fileName);
             if (index == -1) throw new Exception("ERROR: file " + fileName + " does not exist");
@@ -228,13 +228,13 @@ public class FileSystemManager {
             writeEmptyFEntry(index);
             disk.getFD().sync();
         } finally {
-            lock.writeLock().unlock();
+            lock.writeLock().unlock(); // Release write lock
         }
     }
 
     // -------------------- List --------------------
     public String[] listFiles() {
-        lock.readLock().lock();
+        lock.readLock().lock(); //allow multiple concurrent readers but block writers
         try {
             ArrayList<String> files = new ArrayList<>();
             for (FEntry entry : inodeTable) {
@@ -242,7 +242,7 @@ public class FileSystemManager {
             }
             return files.toArray(new String[0]);
         } finally {
-            lock.readLock().unlock();
+            lock.readLock().unlock(); // Release read lock 
         }
     }
 
