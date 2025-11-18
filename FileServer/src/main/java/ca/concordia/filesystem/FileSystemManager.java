@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class FileSystemManager {
@@ -16,11 +18,15 @@ public class FileSystemManager {
     private final int MAXBLOCKS = 10;
     private static FileSystemManager instance;
     private RandomAccessFile disk;
-    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
+    
+    // FIX: Global lock protects inode table modifications (CREATE/DELETE)
+    // Per-file locks protect read/write operations
+    private final ReentrantReadWriteLock globalLock = new ReentrantReadWriteLock(true);
+    private final Map<String, ReentrantReadWriteLock> fileLocks = new HashMap<>();
 
     private static final int BLOCK_SIZE = 128;
-    private static final int FENTRY_SIZE = 15; // 11 bytes name + 2 bytes size + 2 bytes firstblock
-    private static final int FNODE_SIZE = 4;   // 2 bytes blockIndex + 2 bytes nextBlock
+    private static final int FENTRY_SIZE = 15;
+    private static final int FNODE_SIZE = 4;
 
     private final FEntry[] inodeTable;
     private final FNode[] nodeTable;
@@ -33,8 +39,6 @@ public class FileSystemManager {
     public FileSystemManager(String filename, int totalSize) {
         try {
             File f = new File(filename);
-            
-            // FIX 1: "rws" mode forces synchronous writes for persistence
             this.disk = new RandomAccessFile(f, "rws");
 
             this.inodeTable = new FEntry[MAXFILES];
@@ -47,13 +51,12 @@ public class FileSystemManager {
             if (!f.exists() || f.length() == 0) {
                 initializeEmptyFileSystem();
             } else {
-                loadFileSystem(); // This is where the bug was
+                loadFileSystem();
             }
 
             instance = this;
             System.out.println("File system initialized. Data starts at byte " + DATA_START_OFFSET);
 
-            // FIX 2: Shutdown hook for persistence
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 System.out.println("Shutdown hook running: Closing RandomAccessFile...");
                 this.close();
@@ -63,7 +66,6 @@ public class FileSystemManager {
         }
     }
 
-    // FIX 2 (Helper): Close method for shutdown hook
     public void close() {
         try {
             if (this.disk != null) {
@@ -73,6 +75,11 @@ public class FileSystemManager {
         } catch (IOException e) {
             System.err.println("Error closing RandomAccessFile: " + e.getMessage());
         }
+    }
+
+    //  Helper: Get or create per-file lock
+    private ReentrantReadWriteLock getFileLock(String fileName) {
+        return fileLocks.computeIfAbsent(fileName, k -> new ReentrantReadWriteLock(true));
     }
 
     // -------------------- Initialization --------------------
@@ -94,29 +101,23 @@ public class FileSystemManager {
         disk.seek(0);
         byte[] nameBuffer = new byte[11];
 
-        // Load FEntries
         for (int i = 0; i < MAXFILES; i++) {
             disk.readFully(nameBuffer);
-
-            // Create a string from all 11 bytes
             String nameWithNuls = new String(nameBuffer, StandardCharsets.UTF_8);
-            
-            // Find the first NUL character
             int nulIndex = nameWithNuls.indexOf('\u0000');
-            
-            // If we found a NUL, cut the string off before it.
-            // Otherwise, just use the string.
             String name = (nulIndex == -1) ? nameWithNuls.trim() : nameWithNuls.substring(0, nulIndex).trim();
-            
             short size = disk.readShort();
             short firstBlock = disk.readShort();
 
-            if (!name.isEmpty()) {
+            if (!name.isEmpty() && size > 0) {
                 inodeTable[i] = new FEntry(name, size, firstBlock);
+                // Pre-create lock for loaded files
+                getFileLock(name);
+            }else {
+                inodeTable[i] = null;
             }
         }
 
-        // Load FNodes (this part is fine)
         for (int i = 0; i < MAXBLOCKS; i++) {
             short blockIndex = disk.readShort();
             short next = disk.readShort();
@@ -125,22 +126,18 @@ public class FileSystemManager {
             freeBlockList[i] = (blockIndex < 0);
         }
     }
-    // ----------------------------------------------------------
-
 
     // -------------------- Create --------------------
     public void createFile(String fileName) throws Exception {
-        lock.writeLock().lock();
+        globalLock.writeLock().lock();  // Protect inode table
         try {
-            // FIX 3: "filename too long" for test
             if (fileName.length() > 11) {
                 throw new Exception("ERROR: filename too long");
             }
 
-            // FIX 4: Silent return if file exists for test
             for (FEntry entry : inodeTable) {
                 if (entry != null && entry.getFilename().equals(fileName)) {
-                    return;
+                    return;  // File exists, return silently
                 }
             }
 
@@ -157,59 +154,91 @@ public class FileSystemManager {
 
             inodeTable[freeIndex] = new FEntry(fileName, (short) 0, (short) -1);
             writeFEntry(freeIndex, inodeTable[freeIndex]);
-            disk.getFD().sync(); // Force sync for persistence
+            
+            // Create per-file lock for this new file
+            getFileLock(fileName);
+            
+            disk.getFD().sync();
         } finally {
-            lock.writeLock().unlock();
+            globalLock.writeLock().unlock();
         }
     }
 
     // -------------------- Write --------------------
     public void writeFile(String fileName, byte[] contents) throws Exception {
-        lock.writeLock().lock();
+        ReentrantReadWriteLock fileLock = getFileLock(fileName);
+        fileLock.writeLock().lock();  // ✅ Per-file write lock
         try {
-            FEntry file = findFile(fileName);
-            if (file == null) throw new Exception("ERROR: file " + fileName + " does not exist");
+            // Check if file exists (briefly acquire global lock)
+            globalLock.readLock().lock();
+            try {
+                FEntry file = findFile(fileName);
+                if (file == null) {
+                    throw new Exception("ERROR: file " + fileName + " does not exist");
+                }
+            } finally {
+                globalLock.readLock().unlock();
+            }
 
             int neededBlocks = (int) Math.ceil((double) contents.length / BLOCK_SIZE);
             int[] freeBlocks = findFreeBlocks(neededBlocks);
-            if (freeBlocks == null) throw new Exception("ERROR: file too large or insufficient space");
-
-            clearFileBlocks(file);
-
-            short firstBlock = (short) freeBlocks[0];
-            file.setFilesize((short) contents.length);
-            file.setFirstBlock(firstBlock);
-
-            for (int i = 0; i < neededBlocks; i++) {
-                int blockIndex = freeBlocks[i];
-                int nextBlock = (i < neededBlocks - 1) ? freeBlocks[i + 1] : -1;
-
-                freeBlockList[blockIndex] = false;
-                nodeTable[blockIndex] = new FNode(blockIndex);
-                nodeTable[blockIndex].setNext(nextBlock);
-                writeFNode(blockIndex, blockIndex, nextBlock);
-
-                long dataPos = DATA_START_OFFSET + (blockIndex * BLOCK_SIZE);
-                disk.seek(dataPos);
-                int length = Math.min(BLOCK_SIZE, contents.length - (i * BLOCK_SIZE));
-                disk.write(contents, i * BLOCK_SIZE, length);
+            if (freeBlocks == null) {
+                throw new Exception("ERROR: file too large or insufficient space");
             }
 
-            writeFEntry(findFEntryIndex(fileName), file);
-            disk.getFD().sync(); // Force sync for persistence
+            globalLock.writeLock().lock();  // Protect inode table and block list
+            try {
+                FEntry file = findFile(fileName);
+                if (file == null) {
+                    throw new Exception("ERROR: file " + fileName + " does not exist");
+                }
+                
+                clearFileBlocks(file);
+
+                short firstBlock = (short) freeBlocks[0];
+                file.setFilesize((short) contents.length);
+                file.setFirstBlock(firstBlock);
+
+                for (int i = 0; i < neededBlocks; i++) {
+                    int blockIndex = freeBlocks[i];
+                    int nextBlock = (i < neededBlocks - 1) ? freeBlocks[i + 1] : -1;
+
+                    freeBlockList[blockIndex] = false;
+                    nodeTable[blockIndex] = new FNode(blockIndex);
+                    nodeTable[blockIndex].setNext(nextBlock);
+                    writeFNode(blockIndex, blockIndex, nextBlock);
+
+                    long dataPos = DATA_START_OFFSET + (blockIndex * BLOCK_SIZE);
+                    disk.seek(dataPos);
+                    int length = Math.min(BLOCK_SIZE, contents.length - (i * BLOCK_SIZE));
+                    disk.write(contents, i * BLOCK_SIZE, length);
+                }
+
+                writeFEntry(findFEntryIndex(fileName), file);
+                disk.getFD().sync();
+            } finally {
+                globalLock.writeLock().unlock();
+            }
         } finally {
-            lock.writeLock().unlock();
+            fileLock.writeLock().unlock();
         }
     }
 
     // -------------------- Read --------------------
     public byte[] readFile(String fileName) throws Exception {
-        lock.readLock().lock();
+        ReentrantReadWriteLock fileLock = getFileLock(fileName);
+        fileLock.readLock().lock();
         try {
             FEntry file = findFile(fileName);
-            if (file == null) throw new Exception("ERROR: file " + fileName + " does not exist");
+            if (file == null) {
+                throw new Exception("ERROR: file " + fileName + " does not exist");
+            }
 
             byte[] data = new byte[file.getFilesize()];
+            if (file.getFilesize() == 0) {
+                return data;
+            }
+
             int bytesRead = 0;
             short currentNodeIndex = file.getFirstBlock();
 
@@ -225,46 +254,57 @@ public class FileSystemManager {
             }
             return data;
         } finally {
-            lock.readLock().unlock();
+            fileLock.readLock().unlock();
         }
     }
 
+
     // -------------------- Delete --------------------
     public void deleteFile(String fileName) throws Exception {
-        lock.writeLock().lock();
+        globalLock.writeLock().lock();  // Protect inode table
         try {
             int index = findFEntryIndex(fileName);
-            if (index == -1) throw new Exception("ERROR: file " + fileName + " does not exist");
+            if (index == -1) {
+                throw new Exception("ERROR: file " + fileName + " does not exist");
+            }
 
             FEntry entry = inodeTable[index];
             clearFileBlocks(entry);
 
             inodeTable[index] = null;
             writeEmptyFEntry(index);
-            disk.getFD().sync(); // Force sync for persistence
+            
+            // Remove the per-file lock
+            fileLocks.remove(fileName);
+            
+            disk.getFD().sync();
         } finally {
-            lock.writeLock().unlock();
+            globalLock.writeLock().unlock();
         }
     }
 
     // -------------------- List --------------------
     public String[] listFiles() {
-        lock.readLock().lock();
+        globalLock.readLock().lock();  // Protect inode table read
         try {
             ArrayList<String> files = new ArrayList<>();
             for (FEntry entry : inodeTable) {
-                if (entry != null) files.add(entry.getFilename());
+                if (entry != null) {
+                    files.add(entry.getFilename());
+                }
             }
             return files.toArray(new String[0]);
         } finally {
-            lock.readLock().unlock();
+            globalLock.readLock().unlock();
         }
     }
 
     // -------------------- Utility Methods --------------------
     private FEntry findFile(String name) {
         for (FEntry e : inodeTable) {
-            if (e != null && e.getFilename().equals(name)) return e;
+            if (e != null && e.getFilename().equals(name)) {
+                return e;
+            }
         }
         return null;
     }
@@ -281,8 +321,12 @@ public class FileSystemManager {
     private int[] findFreeBlocks(int count) {
         ArrayList<Integer> free = new ArrayList<>();
         for (int i = 0; i < MAXBLOCKS; i++) {
-            if (freeBlockList[i]) free.add(i);
-            if (free.size() == count) break;
+            if (freeBlockList[i]) {
+                free.add(i);
+            }
+            if (free.size() == count) {
+                break;
+            }
         }
         return (free.size() == count) ? free.stream().mapToInt(Integer::intValue).toArray() : null;
     }
@@ -293,7 +337,7 @@ public class FileSystemManager {
             FNode node = nodeTable[nodeIndex];
             long dataPos = DATA_START_OFFSET + (node.getBlockIndex() * BLOCK_SIZE);
             disk.seek(dataPos);
-            disk.write(new byte[BLOCK_SIZE]); // overwrite with zeroes
+            disk.write(new byte[BLOCK_SIZE]);
             freeBlockList[nodeIndex] = true;
             nodeIndex = (short) node.getNext();
             writeFNode(node.getBlockIndex(), -1, -1);
