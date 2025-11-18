@@ -167,7 +167,7 @@ public class FileSystemManager {
     // -------------------- Write --------------------
     public void writeFile(String fileName, byte[] contents) throws Exception {
         ReentrantReadWriteLock fileLock = getFileLock(fileName);
-        fileLock.writeLock().lock();  // ✅ Per-file write lock
+        fileLock.writeLock().lock();  //  Per-file write lock
         try {
             // Check if file exists (briefly acquire global lock)
             globalLock.readLock().lock();
